@@ -173,7 +173,7 @@
   const BALL_M = 32;                   // radio de la pelota: toca justo paredes, techo y césped
   // Velocidad del juego: 1 = la del original. Por debajo, todo va a cámara lenta (coches, pelota, saltos
   // y giros) y las trayectorias siguen siendo las mismas.
-  const SPEED = 0.5;
+  const SPEED = 0.7;
   const SUBSTEPS = 4;                  // pasos de choque por fotograma, para que la pelota no atraviese el coche
   const GOAL_Y = (GOAL_TOP + FLOOR) / 2;
 
@@ -318,10 +318,16 @@
     // sobre las ruedas: los bajos del coche miran al suelo
     const downX = Math.sin(car.angle * RAD), downY = Math.cos(car.angle * RAD);
     car.grounded = car.floor && downY > 0.82;
-    // ruedas apoyadas en pared, techo o esquina: recupera un salto
+    // ruedas apoyadas en pared, techo o esquina: recupera el doble salto
+    for (const side of [-1, 1]) {
+      // tocando la pared (con margen) aunque no la esté empujando en este fotograma
+      const near = side < 0 ? Math.min(...pts.map((q) => q.x)) <= L + 0.5 : Math.max(...pts.map((q) => q.x)) >= R - 0.5;
+      if (near && Math.min(...pts.map((q) => q.y)) < GOAL_TOP) touching.push({ nx: -side, ny: 0 });
+    }
+    if (Math.min(...pts.map((q) => q.y)) <= CEIL + 0.5) touching.push({ nx: 0, ny: 1 });
     for (const t of touching) {
       if (t.ny === -1 && t.nx === 0) continue;
-      if (-(downX * t.nx + downY * t.ny) > 0.85) car.jumps = Math.max(car.jumps, 1);
+      if (-(downX * t.nx + downY * t.ny) > 0.6) car.jumps = Math.max(car.jumps, 1);
     }
   }
 
@@ -679,7 +685,10 @@
       car.hs *= Math.pow(0.9, SPEED);
       if (c.jump) { car.jumps = 1; car.vs = -4; sndJump(); }
     } else if (c.jump && car.jumps > 0) {
+      // doble salto: lo tienes hasta que lo gastas y siempre empuja entero
+      // (si el coche ya caía, primero se para la caída para que no se "coma" el salto)
       car.jumps -= 1;
+      if (car.vs > 0) car.vs = 0;
       motionAdd(car, car.angle + 90, 4);
       sndJump();
     }
