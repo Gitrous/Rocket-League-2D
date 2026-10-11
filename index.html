@@ -170,13 +170,11 @@
   const W = 1024, H = 384, FPS = 60;
   const L = 96, R = 928, CEIL = 26, FLOOR = 352, GOAL_TOP = 226, BACK_L = 8, BACK_R = 1016, CORNER = 70;
   const GROUND = FLOOR - 6;            // punto de apoyo del coche
-  const BALL_M = 36;                   // margen de la pelota (radio 32)
-  const CAR_M = 25;                    // margen del coche
+  const BALL_M = 32;                   // radio de la pelota: toca justo paredes, techo y césped
   // Velocidad del juego: 1 = la del original. Por debajo, todo va a cámara lenta (coches, pelota, saltos
   // y giros) y las trayectorias siguen siendo las mismas.
   const SPEED = 0.5;
   const SUBSTEPS = 4;                  // pasos de choque por fotograma, para que la pelota no atraviese el coche
-  const CAR_TOP = 30;                  // altura del coche sobre su punto de apoyo, para el larguero
   const GOAL_Y = (GOAL_TOP + FLOOR) / 2;
 
   // Cada opción cambia en la misma dirección todas sus propiedades, de más ligero a más pesado.
@@ -274,6 +272,57 @@
       if (ex * (cy - p.y) - ey * (cx - p.x) > 0) pos++; else neg++;
     }
     return pos === 0 || neg === 0 || best < r * r;
+  }
+
+  // El contorno del coche contra el estadio: césped, techo, paredes, larguero, fondo de la portería y
+  // esquinas curvas. Así el coche toca de verdad las superficies (no flota) y puede quedarse volcado.
+  function constrainCar(car) {
+    car.floor = false;
+    const touching = [];
+    for (let iter = 0; iter < 3; iter++) {
+      const pts = carPolygon(car);
+      const midX = pts.reduce((sum, q) => sum + q.x, 0) / pts.length;  // centro del coche
+      let push = null; // { pen, nx, ny }
+      const take = (pen, nx, ny) => { if (pen > 0.001 && (!push || pen > push.pen)) push = { pen, nx, ny }; };
+      for (const p of pts) {
+        take(p.y - GROUND, 0, -1);                                  // césped
+        take(CEIL - p.y, 0, 1);                                     // techo
+        for (const side of [-1, 1]) {
+          const out = side < 0 ? L - p.x : p.x - R;                 // cuánto se mete en la pared
+          if (out <= 0) continue;
+          const inRecess = side < 0 ? midX < L : midX > R;  // el coche está dentro de la portería
+          if (p.y < GOAL_TOP) {
+            // bloque de la pared por encima del larguero
+            if (inRecess) take(GOAL_TOP - p.y, 0, 1);
+            else take(out, -side, 0);
+          } else {
+            take(side < 0 ? BACK_L - p.x : p.x - BACK_R, -side, 0); // fondo de la portería
+          }
+        }
+        // esquinas curvas de arriba
+        if (p.y < CEIL + CORNER && p.y < GOAL_TOP && (p.x < L + CORNER || p.x > R - CORNER)) {
+          const cx = p.x < W / 2 ? L + CORNER : R - CORNER, cy = CEIL + CORNER;
+          const dx = p.x - cx, dy = p.y - cy, d = Math.hypot(dx, dy);
+          if (d > CORNER) take(d - CORNER, -dx / d, -dy / d);
+        }
+      }
+      if (!push) break;
+      car.x += push.nx * push.pen; car.y += push.ny * push.pen;
+      const vn = car.hs * push.nx + car.vs * push.ny;
+      if (vn < 0) { car.hs -= push.nx * vn; car.vs -= push.ny * vn; }
+      touching.push(push);
+    }
+    // ¿qué está tocando ahora? (con un margen pequeño)
+    const pts = carPolygon(car);
+    if (Math.max(...pts.map((p) => p.y)) >= GROUND - 0.5) { car.floor = true; touching.push({ nx: 0, ny: -1 }); }
+    // sobre las ruedas: los bajos del coche miran al suelo
+    const downX = Math.sin(car.angle * RAD), downY = Math.cos(car.angle * RAD);
+    car.grounded = car.floor && downY > 0.82;
+    // ruedas apoyadas en pared, techo o esquina: recupera un salto
+    for (const t of touching) {
+      if (t.ny === -1 && t.nx === 0) continue;
+      if (-(downX * t.nx + downY * t.ny) > 0.85) car.jumps = Math.max(car.jumps, 1);
+    }
   }
 
   // esquinas redondeadas de arriba: mantiene el punto a (CORNER - margen) del centro de la curva
@@ -524,7 +573,8 @@
     const facing = slot === 0 ? 1 : -1;
     return {
       slot, facing, x: slot === 0 ? 170 : W - 170, y: GROUND, hs: 0, vs: 0, angle: 0,
-      jumps: 1, boosting: false, recess: false, spin: 0, ai: slot === 1 && settings.ai,
+      jumps: 1, boosting: false, spin: 0, ai: slot === 1 && settings.ai,
+      floor: true, grounded: true,
     };
   }
   function resetPositions() {
@@ -559,7 +609,8 @@
   // IA del original: detrás de la pelota acelera o salta; en el aire apunta el morro a la pelota
   function aiInput(car) {
     const out = { h: 0, turn: 0, jump: 0, boost: 0, brake: 0 };
-    const onGround = car.y >= GROUND;
+    if (car.floor && !car.grounded) { out.jump = (tick % 30) === 0 ? 1 : 0; return out; }  // volcado: saltar para levantarse
+    const onGround = car.floor && car.grounded;
     const attack = car.slot === 0 ? 1 : -1;
     const behind = (ball.x - car.x) * attack > 0;
     if (onGround) {
@@ -585,8 +636,8 @@
       c = { h, turn: h, jump: k.jump ? 1 : 0, boost: k.boost ? 1 : 0, brake: k.brake ? 1 : 0 };
     }
 
-    // girar en el aire: derecha = horario, izquierda = antihorario
-    car.angle -= 3 * SPEED * c.turn;
+    // girar en el aire: derecha = horario, izquierda = antihorario (volcado en el suelo no gira solo)
+    if (!(car.floor && !car.grounded)) car.angle -= 3 * SPEED * c.turn;
     if (car.angle < -179) car.angle += 360;
     if (car.angle > 180) car.angle -= 360;
 
@@ -602,63 +653,35 @@
       }
     }
 
-    const onGround = car.y >= GROUND;
-    if (onGround) {
-      car.y = GROUND; car.vs = 0;
+    if (car.floor && car.grounded) {
+      // sobre las ruedas
       if (car.hs < 0) car.hs = Math.min(0, car.hs + 0.05 * SPEED);
       if (car.hs > 0) car.hs = Math.max(0, car.hs - 0.05 * SPEED);
-      if (car.angle < 0) car.angle += 10 * SPEED;
-      if (car.angle > 0) car.angle -= 10 * SPEED;
-      if (car.angle > -9 && car.angle < 9) car.angle = 0;
-      if (car.angle > -20 && car.angle < 20) {
-        if (c.brake) {
-          // freno: se para enseguida y no acelera
-          car.hs = Math.sign(car.hs) * Math.max(0, Math.abs(car.hs) - 0.3 * SPEED);
-        } else if (c.h) {
-          // hacia el lado contrario primero frena y luego va marcha adelante hacia el otro lado
-          car.hs += 0.2 * SPEED * c.h;
-        }
-        // en el suelo el coche mira siempre hacia donde va: al cambiar de sentido se da la vuelta
-        const dir = car.hs > 0.05 ? 1 : car.hs < -0.05 ? -1 : car.facing;
-        if (dir !== car.facing) { car.facing = dir; car.angle = -car.angle; }
-        car.jumps = 2;
-        if (c.jump) { car.jumps -= 1; car.vs = -4; sndJump(); }
+      if (car.angle < 0) car.angle = Math.min(0, car.angle + 10 * SPEED);
+      if (car.angle > 0) car.angle = Math.max(0, car.angle - 10 * SPEED);
+      if (c.brake) {
+        // freno: se para enseguida y no acelera
+        car.hs = Math.sign(car.hs) * Math.max(0, Math.abs(car.hs) - 0.3 * SPEED);
+      } else if (c.h) {
+        // hacia el lado contrario primero frena y luego va marcha adelante hacia el otro lado
+        car.hs += 0.2 * SPEED * c.h;
       }
+      // en el suelo el coche mira siempre hacia donde va: al cambiar de sentido se da la vuelta
+      const dir = car.hs > 0.05 ? 1 : car.hs < -0.05 ? -1 : car.facing;
+      if (dir !== car.facing) { car.facing = dir; car.angle = -car.angle; }
+      car.jumps = 2;
+      if (c.jump) { car.jumps -= 1; car.vs = -4; sndJump(); }
+    } else if (car.floor) {
+      // volcado o de lado: cae hacia el lado más cercano (ruedas o techo) y se queda así hasta que saltes
+      const target = Math.abs(car.angle) < 90 ? 0 : car.angle > 0 ? 180 : -180;
+      const d = target - car.angle;
+      car.angle += Math.sign(d) * Math.min(Math.abs(d), 4 * SPEED);
+      car.hs *= Math.pow(0.9, SPEED);
+      if (c.jump) { car.jumps = 1; car.vs = -4; sndJump(); }
     } else if (c.jump && car.jumps > 0) {
       car.jumps -= 1;
       motionAdd(car, car.angle + 90, 4);
       sndJump();
-    }
-
-    // techo
-    if (car.y < CEIL + CAR_M) {
-      car.y = CEIL + CAR_M; car.vs = 0;
-      if (car.angle < -160 || car.angle > 160) car.jumps = 1;
-    }
-    // paredes, con hueco para meterse en la portería por abajo
-    for (const side of [-1, 1]) {
-      const wallX = side < 0 ? L + CAR_M : R - CAR_M;
-      const backX = side < 0 ? BACK_L + CAR_M : BACK_R - CAR_M;
-      const beyond = side < 0 ? car.x < wallX : car.x > wallX;
-      if (!beyond) continue;
-      if (!car.recess && car.y - CAR_TOP < GOAL_TOP) {
-        car.x = wallX; car.hs = 0;
-        if (side < 0 ? (car.angle > -110 && car.angle < -70) : (car.angle > 70 && car.angle < 110)) car.jumps = 1;
-      } else {
-        car.recess = true;
-        if (car.y < GOAL_TOP + CAR_TOP) { car.y = GOAL_TOP + CAR_TOP; if (car.vs < 0) car.vs = 0; }
-        if (side < 0 ? car.x < backX : car.x > backX) {
-          car.x = backX; car.hs = 0;
-          if (side < 0 ? (car.angle > -110 && car.angle < -70) : (car.angle > 70 && car.angle < 110)) car.jumps = 1;
-        }
-      }
-    }
-    if (car.x >= L + CAR_M && car.x <= R - CAR_M) car.recess = false;
-    // esquinas curvas: con las ruedas apoyadas también se recupera un salto
-    const hit = cornerConstrain(car, CAR_M, 0);
-    if (hit) {
-      const upx = Math.cos((car.angle + 90) * RAD), upy = -Math.sin((car.angle + 90) * RAD);
-      if (-(upx * hit.nx + upy * hit.ny) > 0.9) car.jumps = 1;
     }
 
     capSpeed(car, 8);
@@ -680,12 +703,12 @@
   function ballStep() {
     const B = BALL_PHYSICS[settings.ball];
     const b = ball;
-    if (b.y > FLOOR - BALL_M) {
-      b.y = FLOOR - BALL_M;
+    if (b.y > GROUND - BALL_M) {
+      b.y = GROUND - BALL_M;
       b.vs = -B.bounce * Math.abs(b.vs);
       if (b.vs > -0.6) b.vs = 0;       // botes diminutos: se queda en el suelo
     }
-    if (b.y >= FLOOR - BALL_M - 0.5) b.hs *= Math.pow(B.roll, SPEED);  // rozamiento al rodar
+    if (b.y >= GROUND - BALL_M - 0.5) b.hs *= Math.pow(B.roll, SPEED);  // rozamiento al rodar
     if (b.y < CEIL + BALL_M) { b.y = CEIL + BALL_M; b.vs = B.bounce * Math.abs(b.vs); }
 
     for (const side of [-1, 1]) {
@@ -764,6 +787,7 @@
       ball.x = px + nx * 31.5; ball.y = py + ny * 31.5;
       // rebote: el golpe se reparte según las masas del coche y de la pelota
       const vn = (ball.hs - car.hs) * nx + (ball.vs - car.vs) * ny;
+      const closing = Math.max(0, -vn);   // lo rápido que se acercan: un roce suave apenas la mueve
       if (vn < 0) {
         const j = -vn * (1 + B.carBounce);
         const mb = B.mass, mc = P.mass;
@@ -775,8 +799,9 @@
         const dirToBall = pointDirection(car.x, car.y, ball.x, ball.y);
         const dirToCar = pointDirection(ball.x, ball.y, car.x, car.y);
         const diff = Math.abs(angleDifference(dirToBall, car.angle));
-        motionAdd(ball, dirToBall, Math.abs(diff - 90) * 0.05 * P.hit * B.hit);
-        motionAdd(car, dirToCar, P.push);
+        // con el morro o la cola pega más que con el techo, y siempre según la velocidad del choque
+        motionAdd(ball, dirToBall, closing * 0.35 * (Math.abs(diff - 90) / 90) * P.hit * B.hit);
+        motionAdd(car, dirToCar, P.push * Math.min(1, closing / 4));
         if (ball.bounceCooldown <= 0) { sndBounce(); ball.bounceCooldown = 20; }
         if (ball.lastTouchedBy !== i) {
           ball.lastTouchedBy = i;
@@ -799,6 +824,7 @@
       const f = SPEED / SUBSTEPS;
       for (let k = 0; k < SUBSTEPS; k++) {
         for (const o of [...cars, ball]) { o.x += o.hs * f; o.y += o.vs * f; }
+        for (const car of cars) constrainCar(car);
         ballCarCollisions();
       }
       for (const car of cars) car.spin += car.hs * car.facing / 6.5 * SPEED;
