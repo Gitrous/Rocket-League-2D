@@ -117,7 +117,7 @@
       <button class="abs btn" id="toGarage" type="button" style="left:50.5%;top:95%">Play!</button>
       <div class="notes">
         <p class="title">Update v2.0:</p>
-        <p>Less bouncy ball, consistent physics</p>
+        <p>Slower game, less bouncy ball</p>
         <p>You can now change car physics</p>
         <p>You can now change ball physics</p>
         <p>Background cheering audience</p>
@@ -172,26 +172,30 @@
   const GROUND = FLOOR - 6;            // punto de apoyo del coche
   const BALL_M = 36;                   // margen de la pelota (radio 32)
   const CAR_M = 25;                    // margen del coche
+  // Velocidad del juego: 1 = la del original. Por debajo, todo va a cámara lenta (coches, pelota, saltos
+  // y giros) y las trayectorias siguen siendo las mismas.
+  const SPEED = 0.5;
+  const SUBSTEPS = 4;                  // pasos de choque por fotograma, para que la pelota no atraviese el coche
   const CAR_TOP = 30;                  // altura del coche sobre su punto de apoyo, para el larguero
   const GOAL_Y = (GOAL_TOP + FLOOR) / 2;
 
   // Cada opción cambia en la misma dirección todas sus propiedades, de más ligero a más pesado.
   // g: gravedad · push: empujón que recibe el coche al tocar la pelota · hit: fuerza con la que pega
   const CAR_PHYSICS = {
-    Lighter: { g: 0.07,  push: 0.7, hit: 0.8, tip: 'Flota mucho al saltar, la pelota lo empuja más y pega flojo' },
-    Light:   { g: 0.085, push: 0.6, hit: 0.9, tip: 'Flota algo más que el normal y pega un poco más flojo' },
-    Medium:  { g: 0.1,   push: 0.5, hit: 1,   tip: 'El coche del juego original' },
-    Heavy:   { g: 0.12,  push: 0.3, hit: 1.2, tip: 'Cae rápido, casi no lo mueve la pelota y pega fuerte' },
+    Lighter: { g: 0.07,  mass: 1,   push: 0.7, hit: 0.8, tip: 'Flota mucho al saltar, la pelota lo empuja más y pega flojo' },
+    Light:   { g: 0.085, mass: 1.5, push: 0.6, hit: 0.9, tip: 'Flota algo más que el normal y pega un poco más flojo' },
+    Medium:  { g: 0.1,   mass: 2,   push: 0.5, hit: 1,   tip: 'El coche del juego original' },
+    Heavy:   { g: 0.12,  mass: 3,   push: 0.3, hit: 1.1, tip: 'Cae rápido, casi no lo mueve la pelota y pega fuerte' },
   };
   // g: gravedad · bounce: rebote en suelo, paredes y techo · carBounce: rebote contra los coches
   // hit: lo lejos que sale al tocarla · max: velocidad máxima · roll: lo que rueda por el suelo (1 = sin freno)
   const BALL_PHYSICS = {
-    Lighter: { g: 0.06, bounce: 0.45, carBounce: 0.3,  hit: 1.25, max: 13,   roll: 0.997, tip: 'Cae muy despacio y sale lejos al tocarla' },
-    Light:   { g: 0.08, bounce: 0.4,  carBounce: 0.25, hit: 1.12, max: 12.5, roll: 0.995, tip: 'Cae algo más despacio y sale un poco más lejos' },
-    Medium:  { g: 0.1,  bounce: 0.35, carBounce: 0.2,  hit: 1,    max: 12,   roll: 0.993, tip: 'Peso normal, rebota poco' },
-    Heavy:   { g: 0.13, bounce: 0.22, carBounce: 0.1,  hit: 0.8,  max: 10.5, roll: 0.985, tip: 'Cae rápido, casi no rebota y cuesta moverla' },
-    Bouncy:  { g: 0.1,  bounce: 0.75, carBounce: 0.5,  hit: 1,    max: 12,   roll: 0.996, tip: 'Peso normal, pero rebota mucho' },
-    'Bouncy & Light': { g: 0.07, bounce: 0.78, carBounce: 0.55, hit: 1.15, max: 13, roll: 0.997, tip: 'Ligera y muy saltarina' },
+    Lighter: { g: 0.06, mass: 0.5,  bounce: 0.45, carBounce: 0.3,  hit: 1.2,  max: 11,   roll: 0.997, tip: 'Cae muy despacio y sale lejos al tocarla' },
+    Light:   { g: 0.08, mass: 0.75, bounce: 0.4,  carBounce: 0.25, hit: 1.1,  max: 10.5, roll: 0.995, tip: 'Cae algo más despacio y sale un poco más lejos' },
+    Medium:  { g: 0.1,  mass: 1,    bounce: 0.35, carBounce: 0.2,  hit: 1,    max: 10,   roll: 0.993, tip: 'Peso normal, rebota poco' },
+    Heavy:   { g: 0.13, mass: 2,    bounce: 0.22, carBounce: 0.1,  hit: 0.6,  max: 8,    roll: 0.985, tip: 'Cae rápido, casi no rebota y cuesta moverla' },
+    Bouncy:  { g: 0.1,  mass: 1,    bounce: 0.75, carBounce: 0.5,  hit: 1,    max: 10,   roll: 0.996, tip: 'Peso normal, pero rebota mucho' },
+    'Bouncy & Light': { g: 0.07, mass: 0.6, bounce: 0.78, carBounce: 0.55, hit: 1.1, max: 11, roll: 0.997, tip: 'Ligera y muy saltarina' },
   };
 
   const COLORS = ['#3437e8', '#ea9330', '#e23b3b', '#2fbf55', '#9b4be0', '#f2d43a', '#27c7d8', '#ff6fb5', '#f4f4f4', '#2b2b33'];
@@ -250,6 +254,14 @@
       }
     }
     return true;
+  }
+  function pointInPoly(x, y, poly) {
+    let pos = 0, neg = 0;
+    for (let i = 0; i < poly.length; i++) {
+      const p = poly[i], q = poly[(i + 1) % poly.length];
+      if ((q.x - p.x) * (y - p.y) - (q.y - p.y) * (x - p.x) > 0) pos++; else neg++;
+    }
+    return pos === 0 || neg === 0;
   }
   function circlePolyOverlap(cx, cy, r, poly) {
     let best = Infinity, pos = 0, neg = 0;
@@ -574,13 +586,13 @@
     }
 
     // girar en el aire: derecha = horario, izquierda = antihorario
-    car.angle -= 3 * c.turn;
+    car.angle -= 3 * SPEED * c.turn;
     if (car.angle < -179) car.angle += 360;
     if (car.angle > 180) car.angle -= 360;
 
     car.boosting = !!c.boost;
     if (c.boost) {
-      motionAdd(car, car.facing === -1 ? car.angle + 180 : car.angle, 0.2);
+      motionAdd(car, car.facing === -1 ? car.angle + 180 : car.angle, 0.2 * SPEED);
       const back = (car.facing === -1 ? car.angle : car.angle + 180);
       const bx = car.x + Math.cos((car.angle + (car.facing === -1 ? 20 : 160)) * RAD) * 32;
       const by = car.y - Math.sin((car.angle + (car.facing === -1 ? 20 : 160)) * RAD) * 32 - 0;
@@ -593,18 +605,18 @@
     const onGround = car.y >= GROUND;
     if (onGround) {
       car.y = GROUND; car.vs = 0;
-      if (car.hs < 0) car.hs += 0.05;
-      if (car.hs > 0) car.hs -= 0.05;
-      if (car.angle < 0) car.angle += 10;
-      if (car.angle > 0) car.angle -= 10;
+      if (car.hs < 0) car.hs = Math.min(0, car.hs + 0.05 * SPEED);
+      if (car.hs > 0) car.hs = Math.max(0, car.hs - 0.05 * SPEED);
+      if (car.angle < 0) car.angle += 10 * SPEED;
+      if (car.angle > 0) car.angle -= 10 * SPEED;
       if (car.angle > -9 && car.angle < 9) car.angle = 0;
       if (car.angle > -20 && car.angle < 20) {
         if (c.brake) {
           // freno: se para enseguida y no acelera
-          car.hs = Math.sign(car.hs) * Math.max(0, Math.abs(car.hs) - 0.3);
+          car.hs = Math.sign(car.hs) * Math.max(0, Math.abs(car.hs) - 0.3 * SPEED);
         } else if (c.h) {
           // hacia el lado contrario primero frena y luego va marcha adelante hacia el otro lado
-          car.hs += 0.2 * c.h;
+          car.hs += 0.2 * SPEED * c.h;
         }
         // en el suelo el coche mira siempre hacia donde va: al cambiar de sentido se da la vuelta
         const dir = car.hs > 0.05 ? 1 : car.hs < -0.05 ? -1 : car.facing;
@@ -673,7 +685,7 @@
       b.vs = -B.bounce * Math.abs(b.vs);
       if (b.vs > -0.6) b.vs = 0;       // botes diminutos: se queda en el suelo
     }
-    if (b.y >= FLOOR - BALL_M - 0.5) b.hs *= B.roll;  // rozamiento al rodar
+    if (b.y >= FLOOR - BALL_M - 0.5) b.hs *= Math.pow(B.roll, SPEED);  // rozamiento al rodar
     if (b.y < CEIL + BALL_M) { b.y = CEIL + BALL_M; b.vs = B.bounce * Math.abs(b.vs); }
 
     for (const side of [-1, 1]) {
@@ -705,16 +717,19 @@
     return false;
   }
 
-  function collisions() {
-    const P = CAR_PHYSICS[settings.car];
-    const B = BALL_PHYSICS[settings.ball];
+  function carCarCollision() {
     const polys = cars.map(carPolygon);
     if (polysOverlap(polys[0], polys[1])) {
       for (const [a, o] of [[cars[0], cars[1]], [cars[1], cars[0]]]) {
-        motionAdd(a, pointDirection(o.x, o.y, a.x, a.y), 0.5);
-        motionAdd(o, pointDirection(a.x, a.y, o.x, o.y), 0.5);
+        motionAdd(a, pointDirection(o.x, o.y, a.x, a.y), 0.5 * SPEED);
+        motionAdd(o, pointDirection(a.x, a.y, o.x, o.y), 0.5 * SPEED);
       }
     }
+  }
+  function ballCarCollisions() {
+    const P = CAR_PHYSICS[settings.car];
+    const B = BALL_PHYSICS[settings.ball];
+    const polys = cars.map(carPolygon);
     cars.forEach((car, i) => {
       const poly = polys[i];
       if (!circlePolyOverlap(ball.x, ball.y, 31, poly)) { ball.touch[i] = false; return; }
@@ -727,16 +742,34 @@
         const cx = a.x + ex * t, cy = a.y + ey * t, d = (ball.x - cx) ** 2 + (ball.y - cy) ** 2;
         if (d < best) { best = d; px = cx; py = cy; }
       }
-      const mx = poly.reduce((sum, v) => sum + v.x, 0) / poly.length;
-      const my = poly.reduce((sum, v) => sum + v.y, 0) / poly.length;
-      const inside = Math.hypot(ball.x - mx, ball.y - my) < Math.hypot(px - mx, py - my);
-      let nx = inside ? ball.x - mx : ball.x - px, ny = inside ? ball.y - my : ball.y - py;
-      const nl = Math.hypot(nx, ny) || 1;
-      nx /= nl; ny /= nl;
-      ball.x = px + nx * 31; ball.y = py + ny * 31;
-      // rebote contra el coche según lo saltarina que sea la pelota
+      let nx, ny;
+      if (pointInPoly(ball.x, ball.y, poly)) {
+        // el centro se ha colado dentro: sale por donde entró (al revés de su movimiento respecto al coche)
+        let rx = -(ball.hs - car.hs), ry = -(ball.vs - car.vs);
+        if (Math.hypot(rx, ry) < 0.01) {
+          rx = ball.x - poly.reduce((sum, v) => sum + v.x, 0) / poly.length;
+          ry = ball.y - poly.reduce((sum, v) => sum + v.y, 0) / poly.length;
+        }
+        const rl = Math.hypot(rx, ry) || 1;
+        rx /= rl; ry /= rl;
+        let lo = 0, hi = 120;
+        for (let k = 0; k < 20; k++) { const mid = (lo + hi) / 2; if (pointInPoly(ball.x + rx * mid, ball.y + ry * mid, poly)) lo = mid; else hi = mid; }
+        px = ball.x + rx * hi; py = ball.y + ry * hi;
+        nx = rx; ny = ry;
+      } else {
+        nx = ball.x - px; ny = ball.y - py;
+        const nl = Math.hypot(nx, ny) || 1;
+        nx /= nl; ny /= nl;
+      }
+      ball.x = px + nx * 31.5; ball.y = py + ny * 31.5;
+      // rebote: el golpe se reparte según las masas del coche y de la pelota
       const vn = (ball.hs - car.hs) * nx + (ball.vs - car.vs) * ny;
-      if (vn < 0) { ball.hs -= nx * vn * (1 + B.carBounce); ball.vs -= ny * vn * (1 + B.carBounce); }
+      if (vn < 0) {
+        const j = -vn * (1 + B.carBounce);
+        const mb = B.mass, mc = P.mass;
+        ball.hs += nx * j * mc / (mb + mc); ball.vs += ny * j * mc / (mb + mc);
+        car.hs -= nx * j * mb / (mb + mc); car.vs -= ny * j * mb / (mb + mc);
+      }
       // el toque del original (más fuerte con el morro o la cola), una vez por contacto
       if (!ball.touch[i]) {
         const dirToBall = pointDirection(car.x, car.y, ball.x, ball.y);
@@ -761,13 +794,19 @@
     if (!ballStep()) {
       const P = CAR_PHYSICS[settings.car];
       const B = BALL_PHYSICS[settings.ball];
-      for (const car of cars) { car.vs += P.g; car.x += car.hs; car.y += car.vs; car.spin += car.hs * car.facing / 6.5; }
-      ball.vs += B.g; ball.x += ball.hs; ball.y += ball.vs;
-      ball.spin += ball.hs / 32;
-      collisions();
+      for (const car of cars) car.vs += P.g * SPEED;
+      ball.vs += B.g * SPEED;
+      const f = SPEED / SUBSTEPS;
+      for (let k = 0; k < SUBSTEPS; k++) {
+        for (const o of [...cars, ball]) { o.x += o.hs * f; o.y += o.vs * f; }
+        ballCarCollisions();
+      }
+      for (const car of cars) car.spin += car.hs * car.facing / 6.5 * SPEED;
+      ball.spin += ball.hs / 32 * SPEED;
+      carCarCollision();
     }
     if (banner && --banner.t <= 0) banner = null;
-    for (const p of particles) { p.life -= 1 / 40; p.x += p.vx; p.y += p.vy; p.vx *= 0.96; p.vy = p.vy * 0.96 + (p.g || 0); }
+    for (const p of particles) { p.life -= SPEED / 40; p.x += p.vx * SPEED; p.y += p.vy * SPEED; p.vx *= 0.96; p.vy = p.vy * 0.96 + (p.g || 0) * SPEED; }
     particles = particles.filter((p) => p.life > 0);
   }
 
