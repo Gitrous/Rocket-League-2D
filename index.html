@@ -612,22 +612,60 @@
     };
   }
 
-  // IA del original: detrás de la pelota acelera o salta; en el aire apunta el morro a la pelota
+  // IA: se coloca detrás de la pelota (entre la pelota y su portería), va a por ella y sólo salta
+  // cuando la pelota está alta y cerca; en el aire apunta el morro a la pelota y usa el doble salto.
   function aiInput(car) {
     const out = { h: 0, turn: 0, jump: 0, boost: 0, brake: 0 };
-    if (car.floor && !car.grounded) { out.jump = (tick % 30) === 0 ? 1 : 0; return out; }  // volcado: saltar para levantarse
-    const onGround = car.floor && car.grounded;
-    const attack = car.slot === 0 ? 1 : -1;
-    const behind = (ball.x - car.x) * attack > 0;
-    if (onGround) {
-      if (behind) { if (Math.abs(car.x - ball.x) < 300) out.jump = 1; else out.h = attack; }
-      else out.h = -attack;
-    } else if (behind) {
-      const target = pointDirection(car.x, car.y, ball.x, ball.y - 20);
+    car.aiCd = Math.max(0, (car.aiCd || 0) - 1);
+    const press = () => { if (car.aiCd === 0) { out.jump = 1; car.aiCd = 18; } };
+    if (car.floor && !car.grounded) { press(); return out; }   // volcado: salta para levantarse
+    const attack = car.slot === 0 ? 1 : -1;                     // hacia la portería rival
+    const dx = ball.x - car.x;
+    const height = car.y - ball.y;                              // lo alta que está la pelota sobre el coche
+    const dist = Math.hypot(dx, height - 15);
+    const behind = dx * attack > -10;                           // la pelota está por delante, hacia la portería rival
+    // cada saque la IA juega un poco distinto (anticipa más o menos y tarda algo en reaccionar)
+    if (!car.aiStyle) car.aiStyle = { lead: 6 + Math.random() * 12, wait: Math.floor(Math.random() * 25) };
+    if (car.aiStyle.wait > 0) { car.aiStyle.wait--; return out; }
+    const predictX = ball.x + ball.hs * car.aiStyle.lead;
+
+    if (car.floor && car.grounded) {
+      if (behind) {
+        out.h = Math.sign(predictX - car.x) || attack;
+        out.boost = Math.abs(dx) > 220 && height < 120 ? 1 : 0;
+        // saltar sólo si la pelota está alta y a tiro
+        if (height > 55 && height < 230 && Math.abs(dx) < 70 + height * 0.35) press();
+      } else {
+        // volver por detrás de la pelota hacia su portería; si la pelota baja viene encima, saltarla
+        out.h = -attack;
+        out.boost = Math.abs(dx) > 150 ? 1 : 0;
+        // la pelota está entre el coche y su portería: saltarla por encima en vez de empujarla hacia dentro
+        const closing = (car.hs - ball.hs) * -attack;            // lo rápido que alcanzo la pelota
+        if (Math.abs(dx) < 90 + Math.max(0, closing) * 25 && height < 90 && height > -20) press();
+        // la pelota viene hacia mi portería y no me da tiempo a rodearla: frenar y esperar a que pase
+        if (Math.abs(dx) < 60 && closing < 0.5 && height < 40) { out.h = attack; out.boost = 0; }
+      }
+    } else {
+      // en el aire: si va a caer, primero ponerse de ruedas; si no, morro hacia la pelota
+      const falling = car.vs > 0 && car.y > GROUND - 110;
+      if (!behind) {
+        // pasando por encima de la pelota: recto, con turbo hacia su lado, y segundo salto si hace falta
+        if (Math.abs(car.angle) > 6) out.turn = car.angle > 0 ? 1 : -1;
+        if (Math.abs(car.angle) < 30 && car.facing === -attack) out.boost = 1;
+        if (car.jumps > 0 && Math.abs(dx) < 80 && car.y > ball.y - 40 && car.vs > -1) press();
+        return out;
+      }
+      if (falling || Math.abs(car.angle) > 120 && dist > 160) {
+        if (Math.abs(car.angle) > 6) out.turn = car.angle > 0 ? 1 : -1;
+        return out;
+      }
+      const target = pointDirection(car.x, car.y - 14, ball.x, ball.y);
       const real = car.facing === -1 ? car.angle + 180 : car.angle;
       const dif = angleDifference(real, target);
-      out.turn = dif < 0 ? -1 : 1;
-      if (Math.abs(dif) < 30 && ball.y - car.y < 50) out.boost = 1;
+      if (Math.abs(dif) > 8) out.turn = dif < 0 ? -1 : 1;
+      if (behind && Math.abs(dif) < 25 && dist > 50) out.boost = 1;
+      // doble salto para llegar arriba
+      if (car.jumps > 0 && height > 40 && dist < 130 && car.vs > -1.5) press();
     }
     return out;
   }
@@ -642,8 +680,8 @@
       c = { h, turn: h, jump: k.jump ? 1 : 0, boost: k.boost ? 1 : 0, brake: k.brake ? 1 : 0 };
     }
 
-    // girar en el aire: derecha = horario, izquierda = antihorario (volcado en el suelo no gira solo)
-    if (!(car.floor && !car.grounded)) car.angle -= 3 * SPEED * c.turn;
+    // girar en el aire: derecha = horario, izquierda = antihorario (apoyado en el suelo no gira)
+    if (!car.floor) car.angle -= 3 * SPEED * c.turn;
     if (car.angle < -179) car.angle += 360;
     if (car.angle > 180) car.angle -= 360;
 
@@ -684,7 +722,14 @@
       car.angle += Math.sign(d) * Math.min(Math.abs(d), 4 * SPEED);
       car.hs *= Math.pow(0.9, SPEED);
       if (c.jump) { car.jumps = 1; car.vs = -4; sndJump(); }
-    } else if (c.jump && car.jumps > 0) {
+    }
+    if (car.floor && car.vs >= 0) {
+      // el coche ha girado apoyado en el suelo: lo recolocamos para que siga tocándolo justo
+      const maxY = Math.max(...carPolygon(car).map((q) => q.y));
+      car.y += GROUND - maxY;
+      car.vs = 0;
+    }
+    if (!car.floor && c.jump && car.jumps > 0) {
       // doble salto: lo tienes hasta que lo gastas y siempre empuja entero
       // (si el coche ya caía, primero se para la caída para que no se "coma" el salto)
       car.jumps -= 1;
