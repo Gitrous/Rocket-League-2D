@@ -235,7 +235,8 @@
     return lo.slice(0, -1).concat(up.slice(0, -1));
   }
   // contorno de choque del coche (mirando a la derecha, punto de apoyo abajo en el centro)
-  const CAR_HULL = convexHull([[-31, -6], [-31, -17], [-16, -27], [8, -27], [20, -17], [31, -14], [31, -5], [25, 0], [-25, 0]]);
+  // algo más pequeño que el dibujo y con las esquinas recortadas, para que no se enganche al rozar
+  const CAR_HULL = convexHull([[-27, -6], [-27, -15], [-14, -23], [7, -23], [18, -15], [27, -12], [27, -5], [20, 0], [-20, 0]]);
 
   function carPolygon(car) {
     const c = Math.cos(car.angle * RAD), s = Math.sin(car.angle * RAD);
@@ -319,6 +320,7 @@
     // sobre las ruedas: los bajos del coche miran al suelo
     const downX = Math.sin(car.angle * RAD), downY = Math.cos(car.angle * RAD);
     car.grounded = car.floor && downY > 0.82;
+    car.rest = car.floor ? (car.rest || 0) + 1 : 0;   // fotogramas seguidos apoyado en el suelo
     // ruedas apoyadas en pared, techo o esquina: recupera el doble salto
     for (const side of [-1, 1]) {
       // tocando la pared (con margen) aunque no la esté empujando en este fotograma
@@ -619,7 +621,7 @@
     const out = { h: 0, turn: 0, jump: 0, boost: 0, brake: 0 };
     car.aiCd = Math.max(0, (car.aiCd || 0) - 1);
     const press = () => { if (car.aiCd === 0) { out.jump = 1; car.aiCd = 18; } };
-    if (car.floor && !car.grounded) { press(); return out; }   // volcado: salta para levantarse
+    if (car.floor && !car.grounded && car.rest > 8) { press(); return out; }   // volcado: salta para levantarse
     const attack = car.slot === 0 ? 1 : -1;                     // hacia la portería rival
     const dx = ball.x - car.x;
     const height = car.y - ball.y;                              // lo alta que está la pelota sobre el coche
@@ -684,7 +686,9 @@
     }
 
     // girar en el aire: derecha = horario, izquierda = antihorario (apoyado en el suelo no gira)
-    if (!car.floor) car.angle -= TURN_RATE * SPEED * c.turn;
+    // volcado de verdad = lleva un rato apoyado sin estar sobre las ruedas (un roce no cuenta)
+    const resting = car.floor && !car.grounded && car.rest > 8;
+    if (!(car.floor && car.grounded) && !resting) car.angle -= TURN_RATE * SPEED * c.turn;
     if (car.angle < -179) car.angle += 360;
     if (car.angle > 180) car.angle -= 360;
 
@@ -718,7 +722,7 @@
       if (dir !== car.facing) { car.facing = dir; car.angle = -car.angle; }
       car.jumps = 2;
       if (c.jump) { car.jumps -= 1; car.vs = -4; sndJump(); }
-    } else if (car.floor) {
+    } else if (resting) {
       // volcado o de lado: cae hacia el lado más cercano (ruedas o techo) y se queda así hasta que saltes
       const target = Math.abs(car.angle) < 90 ? 0 : car.angle > 0 ? 180 : -180;
       const d = target - car.angle;
@@ -726,13 +730,13 @@
       car.hs *= Math.pow(0.9, SPEED);
       if (c.jump) { car.jumps = 1; car.vs = -4; sndJump(); }
     }
-    if (car.floor && car.vs >= 0) {
+    if (((car.floor && car.grounded) || resting) && car.vs >= 0) {
       // el coche ha girado apoyado en el suelo: lo recolocamos para que siga tocándolo justo
       const maxY = Math.max(...carPolygon(car).map((q) => q.y));
       car.y += GROUND - maxY;
       car.vs = 0;
     }
-    if (!car.floor && c.jump && car.jumps > 0) {
+    if (!(car.floor && car.grounded) && !resting && c.jump && car.jumps > 0) {
       // doble salto: lo tienes hasta que lo gastas y siempre empuja entero
       // (si el coche ya caía, primero se para la caída para que no se "coma" el salto)
       car.jumps -= 1;
